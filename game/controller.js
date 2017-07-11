@@ -56,9 +56,9 @@ class Keyboard extends Controller {
 }
 
 class AI extends Controller {
-    constructor(script, {unsafe, interval}){
+    constructor(script, unsafe){
         super();
-        this.worker = cluster.fork({script, unsafe, interval});
+        this.worker = cluster.fork({script, unsafe: +unsafe});
         this._onmessage = this.onmessage.bind(this);
         this._ononline = this.ononline.bind(this);
         this._onerror = this.onerror.bind(this);
@@ -70,23 +70,29 @@ class AI extends Controller {
         this.worker.addListener('disconnect', this._ondisconnect);
         this.worker.addListener('exit', this._onexit);
         this.report = {};
+        this.dropped = 0;
+        this.busy = false;
     }
     init(){}
-    onupdate(screen){ this.worker.send({screen, now: Date.now()}); }
-    onmessage(msg){
-        if (msg.report)
-            this.report = msg.report;
-        if (msg.error)
-            this.emit('error', String(msg.error));
-        else if (msg.res.done)
-            this.emit('quit');
+    onupdate(screen){
+        if (this.busy)
+            this.dropped++;
         else
         {
-            if (msg.res.value=='q')
-                this.emit('quit');
-            else
-                this.emit('control', char2dir(msg.res.value));
+            this.busy = true;
+            this.worker.send(screen);
         }
+    }
+    onmessage(msg){
+        this.busy = false;
+        if (msg.report)
+            this.report = Object.assign(msg.report, {dropped: this.dropped});
+        if (msg.error)
+            this.emit('error', String(msg.error));
+        else if (msg.res.done || msg.res.value=='q')
+            this.emit('quit');
+        else
+            this.emit('control', char2dir(msg.res.value));
     }
     ononline(){ this.emit('ready'); }
     onerror(err){ this.emit('error', err); }
@@ -107,18 +113,12 @@ class AI extends Controller {
     static worker_run(){
         let ai, res;
         let load = +process.env.unsafe ? loader.load_unsafe : loader.load;
-        let interval = +process.env.interval;
         let started = Date.now();
         try { ai = load(process.env.script);
         } catch(e){ return process.send({error: String(e.stack)}); }
-        let report = {processed: 0, dropped: 0,
-            init_ms: Date.now()-started, total_ms: 0, max_ms: 0};
-        process.on('message', ({screen, now})=>{
-            if (interval && Date.now()-now >= interval && report.processed)
-            {
-                report.dropped++;
-                return; // skip missed frame (except the very first one)
-            }
+        let report = {processed: 0, init_ms: Date.now()-started,
+            total_ms: 0, max_ms: 0};
+        process.on('message', screen=>{
             started = Date.now();
             try { res = ai(screen);
             } catch(e){ return process.send({error: String(e.stack)}); }
